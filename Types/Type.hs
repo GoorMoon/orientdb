@@ -1,2 +1,0 @@
-module Type where
-
