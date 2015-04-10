@@ -5,8 +5,8 @@
 -
 - -}
 
-module Orientdb.Core 
-( 
+module Orientdb.Core
+(
   bufferLength,
   recvTimeOut,
   sendTimeOut,
@@ -16,23 +16,22 @@ module Orientdb.Core
   csvSerializer,
   OrientDBConnectionInfo(..),
   connectOrientDb,
-  defaultOrientDbConnectionInfo
+  defaultOrientDbConnectionInfo,
+  printConnection,
+  closeConnection
 ) where
 
 import Control.Monad (liftM)
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
-import Network.Socket (Socket(..),SockAddr(..),getAddrInfo,AddrInfo(..),SocketOption(..),setSocketOption,
-                       defaultProtocol,Family(..),SocketType(..),socket,connect)
-
 import Network.Socket.ByteString (send,recvFrom)
 
-import qualified Data.ByteString as BS (ByteString(..),length,unpack,empty,append)
+import qualified Data.ByteString as BS (ByteString,length,unpack,empty,append)
 import qualified Data.ByteString.UTF8 as U (toString)
 import qualified Data.ByteString.Lazy as BSL (fromStrict,toStrict)
-import Data.Word (Word8(..),Word16(..),Word32(..))
-import Data.Int (Int8(..),Int16(..),Int32(..))
-import Data.Binary.Put (Put(..),putWord8,putWord16be,putWord32be,putByteString,runPut)
-import Data.Binary.Get (Get(..),getWord8,getWord16be,getWord32be,getByteString,runGet)
+import Data.Word (Word8,Word16,Word32)
+import Data.Int (Int8,Int16,Int32)
+import Data.Binary.Put (Put,putWord8,putWord16be,putWord32be,putByteString,runPut)
+import Data.Binary.Get (Get,getWord8,getWord16be,getWord32be,getByteString,runGet)
 import Data.IORef
 
 -- Global constants
@@ -82,21 +81,17 @@ data Connection = Connection
     protocolVersion :: Word16
   }
 
---class ShowIO a where
---    showIO :: a -> IO String
-
---instance ShowIO a where
---    showIO = return . show
-
---instance Show Connection where
---  show c = unwords ["<",U.toString . orientDbDatabase . connectionInfo $ c,
---                    "(" ,U.toString . orientDbDatabaseType . connectionInfo $ c,
---                    ")"," : ",show . sessionId $ c,">"]
-
-printSessionId :: Connection -> IO ()
-printSessionId con = do
-    sid <- readIORef (sessionId con)
-    print sid
+printConnection :: Connection -> IO ()
+printConnection c = do
+  sid <- printSessionId c
+  putStrLn $ unwords ["<",U.toString . orientDbDatabase . connectionInfo $ c,
+                    "(" ,U.toString . orientDbDatabaseType . connectionInfo $ c,
+                    ")"," : ",sid,">"]
+  where
+    printSessionId :: Connection -> IO String
+    printSessionId con = do
+        sid <- readIORef (sessionId con)
+        return $ show sid
 
 data Cluster = Cluster
   {
@@ -115,7 +110,7 @@ data Response = Either (Int , String) Response |
     orientDbRelease :: BS.ByteString
   } deriving (Show)
 
-openDbRequestType, 
+openDbRequestType,
   closeDbRequestType,
   commandRequestType
     :: Word8
@@ -177,7 +172,7 @@ getOpenDbResponse response = runGet (do
     status <- getWord8
     _ <- getWord32be
     if status /= 0
-        then do 
+        then do
           errorMessage <- readError
           return $ Left errorMessage
         else do
@@ -221,15 +216,16 @@ runQuery conn query = do
     return ()
     -- Read Response
     where
+      payloadLength :: BS.ByteString -> BS.ByteString -> Word32
       payloadLength cn q = fromIntegral (
-        4 {- sizeof(int) -} + 
-        (BS.length cn) + 
-        4 {- sizeof(int) -} + 
-        (BS.length q) + 
-        4 {- sizeof(int) Non-Text Limit -} + 
-        4 {- sizeof(int) FetchPlan -} + 
+        4 {- sizeof(int) -} +
+        (BS.length cn) +
+        4 {- sizeof(int) -} +
+        (BS.length q) +
+        4 {- sizeof(int) Non-Text Limit -} +
+        4 {- sizeof(int) FetchPlan -} +
         4 {- sizeof(int) Serialized params length -})
---      createPayload :: BS.ByteString -> BS.ByteString
+      createPayload :: BS.ByteString -> Put
       createPayload q = (
         putString q >>
         putWord32be (-1) >>
@@ -239,7 +235,7 @@ runQuery conn query = do
 
 readError :: Get BS.ByteString
 readError = do
-  followByte <- getWord8 
+  followByte <- getWord8
   err <- readError' followByte ""
   if clientProtocolVersion >= 19
     then do
