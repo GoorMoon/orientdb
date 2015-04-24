@@ -1,5 +1,5 @@
 # Overview
-**orientdb** - Haskell Binary driver for OrientDB database
+**orientdb** - Haskell binary driver for [OrientDB](http://orientdb.com/) document/graph database
 
 # Status
 The project is in early development stage
