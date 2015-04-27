@@ -22,6 +22,7 @@ module Orientdb.Core
 ) where
 
 import Control.Monad (liftM)
+import Control.Applicative ((<$>),(<*>))
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString (send,recvFrom)
 
@@ -126,24 +127,23 @@ class RequestResponse a where
 -- Operations
 connectOrientDb :: OrientDBConnectionInfo -> IO Connection
 connectOrientDb ci = do
-  -- Try to rewrite with Control.Applicative
   sock <- createSocket
-  servAddr <- getServerAddr (U.toString $ orientDbHost ci) (orientDbPort ci)
-  connect sock servAddr
-  version <-  recvFrom sock 2 >>= (\(v , _ ) ->
-    return $ runGet getWord16be (BSL.fromStrict v))
+  getServerAddr (U.toString $ orientDbHost ci) (orientDbPort ci) >>= 
+    (\servAddr -> connect sock servAddr)
+  version <-  recvFrom sock 2 >>= 
+    (\(v , _ ) -> return $ runGet getWord16be (BSL.fromStrict v))
   let request = putOpenDbRequest ci
-  --print $ dumpByteString (BSL.toStrict request)
+  --(print . BS.unpack) request
   _ <- send sock request
   response <- readAllContents sock
 --  print $ BS.unpack response
   case getOpenDbResponse response of
       Left m -> error (U.toString m)
-      Right (id' , t , r) ->  do
-        id'' <- newIORef (fromIntegral id')
+      Right (id , t , r) ->  do
+        id' <- newIORef (fromIntegral id)
         return $! Connection
           {
-            sessionId       = id'',
+            sessionId       = id',
             token           = t,
             configuration   = r,
             connectionInfo  = ci,
@@ -168,7 +168,7 @@ putOpenDbRequest ci = BSL.toStrict $ runPut (
 
 
 getOpenDbResponse :: BS.ByteString -> Either BS.ByteString (Int32 , BS.ByteString , Response)
-getOpenDbResponse response = runGet (do
+getOpenDbResponse  = runGet (do
     status <- getWord8
     _ <- getWord32be
     if status /= 0
@@ -176,20 +176,20 @@ getOpenDbResponse response = runGet (do
           errorMessage <- readError
           return $ Left errorMessage
         else do
-          sessionid <- liftM fromIntegral getWord32be
-          tokenSize <- if clientProtocolVersion > 26 then getWord32be else return 0
-          token' <- if clientProtocolVersion > 26 then getByteString (fromIntegral tokenSize) else return ""
+          sessionid <- fromIntegral <$> getWord32be
+          tokenSize <- (getWord32be `getIf`) (clientProtocolVersion > 26) 0
+          token' <- (getByteString (fromIntegral tokenSize) `getIf`) (clientProtocolVersion > 26) ""
           clusters' <- readClusters
-          clusterConfigLength <- liftM fromIntegral getWord32be :: Get Int32
-          clusterConfig <- liftM BS.unpack $ if clusterConfigLength > 0 then getByteString (fromIntegral clusterConfigLength) else return ""
+          clusterConfigLength <- fromIntegral <$> getWord32be :: Get Int32
+          clusterConfig <- BS.unpack <$> (getByteString (fromIntegral clusterConfigLength) `getIf`) (clusterConfigLength > 0) ""
           orientDbReleaseLength <- getWord32be
-          orientDbRelease' <- if orientDbReleaseLength > 0 then getByteString (fromIntegral orientDbReleaseLength) else return ""
-          return $ Right (sessionid , token' , OpenDbResponse clusters' clusterConfig orientDbRelease')) (BSL.fromStrict response)
+          orientDbRelease' <- (getByteString (fromIntegral orientDbReleaseLength) `getIf`) (orientDbReleaseLength > 0) ""
+          return $ Right (sessionid , token' , OpenDbResponse clusters' clusterConfig orientDbRelease')) . BSL.fromStrict 
 
 closeConnection :: Connection -> IO ()
 closeConnection conn = do
     sessionid <- readIORef (sessionId conn)
-    let  request = liftM BSL.toStrict runPut (putWord8 closeDbRequestType >> putWord32be (fromIntegral sessionid))
+    let request = BSL.toStrict $ runPut (putWord8 closeDbRequestType >> putWord32be (fromIntegral sessionid))
     let sock = clientSocket conn
     _ <- send sock request
     shutdown sock ShutdownBoth
@@ -216,6 +216,12 @@ runQuery conn query = do
     return ()
     -- Read Response
     where
+      createPayload :: BS.ByteString -> Put
+      createPayload q = (
+        putString q >>
+        putWord32be (-1) >>
+        putString "" >>
+        putWord32be 0)
       payloadLength :: BS.ByteString -> BS.ByteString -> Word32
       payloadLength cn q = fromIntegral (
         4 {- sizeof(int) -} +
@@ -225,12 +231,6 @@ runQuery conn query = do
         4 {- sizeof(int) Non-Text Limit -} +
         4 {- sizeof(int) FetchPlan -} +
         4 {- sizeof(int) Serialized params length -})
-      createPayload :: BS.ByteString -> Put
-      createPayload q = (
-        putString q >>
-        putWord32be (-1) >>
-        putString "" >>
-        putWord32be 0)
 
 
 readError :: Get BS.ByteString
@@ -239,8 +239,8 @@ readError = do
   err <- readError' followByte ""
   if clientProtocolVersion >= 19
     then do
-      serializedVersionLength <- liftM fromIntegral getWord32be :: Get Int32
-      buffer <- if (serializedVersionLength > 0) then getByteString (fromIntegral serializedVersionLength) else return ""
+      serializedVersionLength <- fromIntegral <$> getWord32be :: Get Int32
+      buffer <- (getByteString (fromIntegral serializedVersionLength) `getIf`) (serializedVersionLength > 0) ""
       return err
     else return err
   where
@@ -248,14 +248,14 @@ readError = do
     readError' 1 m = do
         exceptionClassLength <- getWord32be
         exceptionClassString <- getByteString (fromIntegral exceptionClassLength)
-        exceptionMessageLength <- liftM fromIntegral getWord32be :: Get Int32
+        exceptionMessageLength <- fromIntegral <$> getWord32be :: Get Int32
         if exceptionMessageLength /=  -1
             then do
                 exceptionString <- getByteString (fromIntegral exceptionMessageLength)
-                followByte <- liftM fromIntegral getWord8 :: Get Int8
+                followByte <- fromIntegral <$> getWord8 :: Get Int8
                 readError' (fromIntegral followByte) ((BS.append . BS.append exceptionClassString) ": " exceptionString)
             else do
-                followByte <- liftM fromIntegral getWord8 :: Get Int8
+                followByte <- fromIntegral <$> getWord8 :: Get Int8
                 readError' (fromIntegral followByte) (BS.append exceptionClassString "\r\n")
     readError' _ m = return m
 
@@ -270,9 +270,9 @@ readClusters = do
       cNameLength <- getWord32be
       cName <- getByteString (fromIntegral cNameLength)
       cId <- getWord16be
-      cTypeLength <- if clientProtocolVersion < 24 then getWord32be else return 0
-      cType <- if clientProtocolVersion < 24 then getByteString (fromIntegral cTypeLength) else return ""
-      cDataSegment <- if clientProtocolVersion >= 12 then getWord16be else return 0
+      cTypeLength <- (getWord32be `getIf`) (clientProtocolVersion < 24) 0
+      cType <- (getByteString (fromIntegral cTypeLength) `getIf`) (clientProtocolVersion < 24) ""
+      cDataSegment <- (getWord16be `getIf`) (clientProtocolVersion >= 12) 0
       readClusters' (Cluster cName (fromIntegral cId) cType (fromIntegral cDataSegment) : cs) (count - 1)
 
 
@@ -290,10 +290,10 @@ putIf p c
   | c = p
   | otherwise = putByteString BS.empty
 
-getIf :: (Num a) => Get a -> Bool -> Get a
-getIf p c
-  | c = p
-  | otherwise =  return 0
+getIf :: Get a -> Bool -> a -> Get a
+getIf g c d
+  | c = g
+  | otherwise =  return d
 
 putString :: BS.ByteString -> Put
 putString str = putWord32be (fromIntegral $ BS.length str) >> putByteString str
@@ -307,4 +307,4 @@ createSocket = socket AF_INET Stream defaultProtocol >>=
           return sock )
 
 getServerAddr :: String -> Int -> IO SockAddr
-getServerAddr h p = liftM (addrAddress . head) (getAddrInfo Nothing (Just h) (Just . show $ p))
+getServerAddr h p = (addrAddress . head) <$> (getAddrInfo Nothing (Just h) (Just . show $ p))

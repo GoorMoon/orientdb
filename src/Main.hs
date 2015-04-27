@@ -2,8 +2,6 @@
 
 import Orientdb.Core
 
--- Data Types
-
 main :: IO ()
 main = do
   conn <- connectOrientDb
